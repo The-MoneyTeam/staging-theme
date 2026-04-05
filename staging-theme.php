@@ -264,10 +264,57 @@ class Staging_Theme {
         return true;
     }
 
-    // Ottieni tutte le versioni di staging
+    // Ottieni tutte le versioni di staging (con auto-discovery dal filesystem)
     public function get_staging_versions() {
-        $versions = get_option('staging_theme_versions', array());
-        return is_array($versions) ? $versions : array();
+        $saved = get_option('staging_theme_versions', array());
+        $saved = is_array($saved) ? $saved : array();
+
+        $discovered = $this->discover_staging_themes();
+        $merged = array_unique(array_merge($saved, $discovered));
+        sort($merged);
+
+        // Aggiorna l'opzione solo se ci sono nuove versioni scoperte
+        if (count($merged) !== count($saved) || array_diff($merged, $saved)) {
+            update_option('staging_theme_versions', $merged);
+        }
+
+        return $merged;
+    }
+
+    /**
+     * Scansiona wp-content/themes/ e scopre cartelle che seguono la convenzione
+     * {tema-attivo}-staging-{versione}
+     *
+     * @return array Lista di versioni scoperte dal filesystem
+     */
+    private function discover_staging_themes() {
+        $current_stylesheet = get_option('stylesheet');
+        $prefix = $current_stylesheet . '-staging-';
+        $themes_dir = WP_CONTENT_DIR . '/themes/';
+        $discovered = array();
+
+        if (!is_dir($themes_dir)) {
+            return $discovered;
+        }
+
+        $entries = scandir($themes_dir);
+        if ($entries === false) {
+            return $discovered;
+        }
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            if (strpos($entry, $prefix) === 0 && is_dir($themes_dir . $entry)) {
+                $version = substr($entry, strlen($prefix));
+                if ($version !== '' && $version !== false) {
+                    $discovered[] = $version;
+                }
+            }
+        }
+
+        return $discovered;
     }
 
     // Verifica se il tema di staging esiste fisicamente
