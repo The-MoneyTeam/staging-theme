@@ -45,9 +45,6 @@ class Staging_Theme {
 
         // Aggiungi AJAX handler per eliminare i temi di staging
         add_action('wp_ajax_delete_staging_theme', array($this, 'ajax_delete_staging_theme'));
-        
-        // Aggiungi AJAX handler per rimuovere un tema dall'elenco
-        add_action('wp_ajax_remove_staging_theme_from_list', array($this, 'ajax_remove_staging_theme_from_list'));
 
     // Endpoint di debug per verificare il contesto di staging nelle richieste AJAX
     add_action('wp_ajax_staging_debug', array($this, 'ajax_staging_debug'));
@@ -264,21 +261,24 @@ class Staging_Theme {
         return true;
     }
 
-    // Ottieni tutte le versioni di staging (con auto-discovery dal filesystem)
+    // Ottieni le versioni di staging: il filesystem è la fonte di verità.
+    // La lista corrisponde alle cartelle {tema-attivo}-staging-* effettivamente
+    // presenti in wp-content/themes/; l'option è solo una cache. Così una versione
+    // eliminata (dal workflow di cleanup o a mano via FTP) sparisce da sola dall'elenco,
+    // senza lasciare voci orfane da rimuovere manualmente.
     public function get_staging_versions() {
         $saved = get_option('staging_theme_versions', array());
         $saved = is_array($saved) ? $saved : array();
 
-        $discovered = $this->discover_staging_themes();
-        $merged = array_unique(array_merge($saved, $discovered));
-        sort($merged);
+        $current = $this->discover_staging_themes();
+        sort($current);
 
-        // Aggiorna l'opzione solo se ci sono nuove versioni scoperte
-        if (count($merged) !== count($saved) || array_diff($merged, $saved)) {
-            update_option('staging_theme_versions', $merged);
+        // Riallinea la cache solo se diverge dallo stato reale del filesystem
+        if ($current !== $saved) {
+            update_option('staging_theme_versions', $current);
         }
 
-        return $merged;
+        return $current;
     }
 
     /**
@@ -418,8 +418,8 @@ class Staging_Theme {
 
         // Verifica se esiste
         if (!file_exists($staging_theme_dir)) {
-            // Se non esiste fisicamente, rimuovi solo dalla lista
-            $this->remove_from_versions_list($version);
+            // Già assente sul filesystem: riallinea la cache e conferma
+            $this->get_staging_versions();
             wp_send_json_success('Tema rimosso dalla lista con successo');
             return;
         }
@@ -429,32 +429,10 @@ class Staging_Theme {
             wp_send_json_error('Impossibile eliminare il tema di staging');
         }
 
-        // Rimuovi dalla lista
-        $this->remove_from_versions_list($version);
+        // Riallinea la lista allo stato del filesystem (la voce sparisce da sola)
+        $this->get_staging_versions();
 
         wp_send_json_success('Tema di staging eliminato con successo');
-    }
-
-    // Rimuovi un tema solo dalla lista senza eliminare i file
-    public function ajax_remove_staging_theme_from_list() {
-        // Verifica nonce
-        check_ajax_referer('remove_staging_theme', 'security');
-
-        // Verifica permessi
-        if (!current_user_can('manage_options')) {
-            wp_send_json_error('Permessi insufficienti');
-        }
-
-        $version = sanitize_title($_POST['version']);
-
-        if (empty($version)) {
-            wp_send_json_error('Versione non valida');
-        }
-
-        // Rimuovi dalla lista
-        $this->remove_from_versions_list($version);
-
-        wp_send_json_success('Tema rimosso dalla lista con successo');
     }
 
     /**
@@ -472,18 +450,6 @@ class Staging_Theme {
             'detected_staging_param' => $detected_staging,
         );
         wp_send_json_success($data);
-    }
-
-    // Funzione per rimuovere un tema dalla lista
-    private function remove_from_versions_list($version) {
-        $staging_versions = $this->get_staging_versions();
-        $key = array_search($version, $staging_versions);
-        if ($key !== false) {
-            unset($staging_versions[$key]);
-            update_option('staging_theme_versions', array_values($staging_versions));
-            return true;
-        }
-        return false;
     }
 
     // Aggiunge una pagina di amministrazione
@@ -638,52 +604,27 @@ class Staging_Theme {
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($staging_versions as $version): 
-                            $theme_exists = $this->staging_theme_exists($version);
-                            $theme_path = $this->get_staging_theme_path($version);
+                        <?php foreach ($staging_versions as $version):
+                            $ftp_path = $this->get_staging_theme_path($version, true);
                         ?>
-                            <tr<?php if (!$theme_exists): ?> class="error"<?php endif; ?>>
+                            <tr>
+                                <td><?php echo esc_html($version); ?></td>
+                                <td><?php echo esc_html($this->get_staging_theme_id($version)); ?></td>
                                 <td>
-                                    <?php echo esc_html($version); ?>
-                                    <?php if (!$theme_exists): ?>
-                                        <div class="row-actions">
-                                            <span class="error" style="color: #dc3232;">Il tema è stato eliminato manualmente</span>
-                                        </div>
-                                    <?php endif; ?>
+                                    <a href="<?php echo esc_url(home_url('?staging=' . $version)); ?>" target="_blank">
+                                        <?php echo esc_url(home_url('?staging=' . $version)); ?>
+                                    </a>
                                 </td>
                                 <td>
-                                    <?php echo esc_html($this->get_staging_theme_id($version)); ?>
+                                    <div class="copy-path-container">
+                                        <code class="path-code"><?php echo esc_html($ftp_path); ?></code>
+                                        <button type="button" class="button copy-path-button" data-path="<?php echo esc_attr($ftp_path); ?>">
+                                            <span class="dashicons dashicons-clipboard" style="margin-top: 3px;"></span> Copia
+                                        </button>
+                                    </div>
                                 </td>
                                 <td>
-                                    <?php if ($theme_exists): ?>
-                                        <a href="<?php echo esc_url(home_url('?staging=' . $version)); ?>" target="_blank">
-                                            <?php echo esc_url(home_url('?staging=' . $version)); ?>
-                                        </a>
-                                    <?php else: ?>
-                                        <em>Non disponibile</em>
-                                    <?php endif; ?>
-                                </td>
-                                <td>
-                                    <?php if ($theme_exists): 
-                                        $ftp_path = $this->get_staging_theme_path($version, true);
-                                        $hosting_type = $this->detect_hosting_type();
-                                    ?>
-                                        <div class="copy-path-container">
-                                            <code class="path-code"><?php echo esc_html($ftp_path); ?></code>
-                                            <button type="button" class="button copy-path-button" data-path="<?php echo esc_attr($ftp_path); ?>">
-                                                <span class="dashicons dashicons-clipboard" style="margin-top: 3px;"></span> Copia
-                                            </button>
-                                        </div>
-                                    <?php else: ?>
-                                        <em>Non disponibile</em>
-                                    <?php endif; ?>
-                                </td>
-                                <td>
-                                    <?php if ($theme_exists): ?>
                                     <button class="button delete-staging-theme" data-version="<?php echo esc_attr($version); ?>" data-nonce="<?php echo wp_create_nonce('delete_staging_theme'); ?>">Elimina</button>
-                                    <?php else: ?>
-                                        <button class="button remove-staging-theme" data-version="<?php echo esc_attr($version); ?>" data-nonce="<?php echo wp_create_nonce('remove_staging_theme'); ?>">Rimuovi dall'elenco</button>
-                                    <?php endif; ?>
                                 </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -783,46 +724,6 @@ class Staging_Theme {
                             error: function() {
                                 alert('Si è verificato un errore durante l\'eliminazione.');
                                 button.prop('disabled', false).text('Elimina');
-                                }
-                            });
-                        });
-
-                        // Gestisce la rimozione dall'elenco (quando il tema è già stato eliminato manualmente)
-                        $('.remove-staging-theme').on('click', function(e) {
-                            e.preventDefault();
-
-                            if (!confirm('Sei sicuro di voler rimuovere questa versione dall\'elenco?')) {
-                                return;
-                            }
-
-                            var button = $(this);
-                            var version = button.data('version');
-                            var nonce = button.data('nonce');
-
-                            $.ajax({
-                                url: ajaxurl,
-                                type: 'POST',
-                                data: {
-                                    action: 'remove_staging_theme_from_list',
-                                    version: version,
-                                    security: nonce
-                                },
-                                before_send: function() {
-                                    button.prop('disabled', true).text('Rimozione...');
-                                },
-                                success: function(response) {
-                                    if (response.success) {
-                                        button.closest('tr').fadeOut(400, function() {
-                                            $(this).remove();
-                                        });
-                                    } else {
-                                        alert('Errore: ' + response.data);
-                                        button.prop('disabled', false).text('Rimuovi dall\'elenco');
-                                    }
-                                },
-                                error: function() {
-                                    alert('Si è verificato un errore durante la rimozione.');
-                                    button.prop('disabled', false).text('Rimuovi dall\'elenco');
                                 }
                             });
                         });
