@@ -3,9 +3,9 @@
 /**
  * Plugin Name: Staging Theme
  * Description: Permette di creare più versioni di staging di un tema e attivarle tramite parametro nell'URL
- * Version: 1.2.3
+ * Version: 1.3.0
  * Author: SP Studio
- * Changelog: Aggiunto supporto robusto per richieste AJAX/REST.
+ * Changelog: Aggiunta modalità staging per il backend (wp-admin) con toggle nella admin bar.
  */
 
 // Previeni l'accesso diretto al file
@@ -23,6 +23,9 @@ class Staging_Theme {
     // Parametro URL per attivare il tema di staging
     private $url_param = 'staging';
 
+    // Nome del cookie che persiste la modalità staging nel backend (separato dal cookie frontend)
+    private $admin_cookie = 'staging_admin_version';
+
     // Costruttore
     public function __construct($skip_hooks = false) {
         if ($skip_hooks) {
@@ -36,6 +39,22 @@ class Staging_Theme {
     add_action('init', array($this, 'bootstrap_staging_context'), 1);
         // Includi subito la logica per le chiamate AJAX (prima di tutto)
         self::include_staging_ajax_file();
+
+        // Risolvi il contesto di staging per il backend molto presto, prima che WordPress
+        // determini il tema (il functions.php viene caricato in setup_theme, prima di 'init')
+        $this->bootstrap_admin_staging_context();
+
+        // Toggle nella admin bar per attivare/disattivare il tema di staging nel backend
+        add_action('admin_bar_menu', array($this, 'add_admin_bar_toggle'), 100);
+
+        // Handler per impostare/azzerare il cookie della modalità staging-admin
+        add_action('admin_post_staging_set_admin', array($this, 'handle_set_admin_staging'));
+
+        // Evidenzia il toggle nella admin bar quando la modalità è attiva
+        add_action('admin_head', array($this, 'admin_bar_toggle_style'));
+
+        // Avviso quando la modalità staging-admin è attiva
+        add_action('admin_notices', array($this, 'admin_notice_staging_active'));
 
         // Aggiungi menu in amministrazione
         add_action('admin_menu', array($this, 'add_admin_menu'));
@@ -169,6 +188,179 @@ class Staging_Theme {
                 setcookie('staging_version', '', time() - 3600, $cookie_path, $cookie_domain, is_ssl(), true);
             }
         }
+    }
+
+    /**
+     * Risolve il contesto di staging per il backend (wp-admin e admin-ajax).
+     *
+     * Viene chiamato molto presto (dal costruttore) perché il functions.php del tema
+     * viene caricato durante setup_theme, prima dell'hook 'init'. Se è attiva la modalità
+     * staging-admin (parametro nell'URL admin o cookie dedicato), imposta $_GET['staging']
+     * così che i filtri esistenti switch_template()/switch_stylesheet() restituiscano il
+     * tema di staging anche nel backend.
+     */
+    public function bootstrap_admin_staging_context() {
+        // Limita l'effetto al backend: is_admin() è true per wp-admin e per admin-ajax.php
+        if (!is_admin()) {
+            return;
+        }
+
+        $version = null;
+
+        // a) Parametro esplicito nell'URL admin (es. dopo il redirect del toggle)
+        if (isset($_GET[$this->url_param]) && $_GET[$this->url_param] !== '') {
+            $version = sanitize_title($_GET[$this->url_param]);
+        }
+        // b) Cookie dedicato impostato dal toggle nella admin bar
+        elseif (isset($_COOKIE[$this->admin_cookie]) && $_COOKIE[$this->admin_cookie] !== '') {
+            $version = sanitize_title($_COOKIE[$this->admin_cookie]);
+        }
+
+        if (!empty($version) && $this->staging_theme_exists($version)) {
+            // I filtri switch_template()/switch_stylesheet() leggono direttamente $_GET[url_param]
+            $_GET[$this->url_param] = $version;
+        }
+    }
+
+    /**
+     * Restituisce la versione di staging attualmente attiva nel backend, oppure null.
+     */
+    private function get_active_admin_staging() {
+        if (isset($_COOKIE[$this->admin_cookie]) && $_COOKIE[$this->admin_cookie] !== '') {
+            $version = sanitize_title($_COOKIE[$this->admin_cookie]);
+            if ($this->staging_theme_exists($version)) {
+                return $version;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Aggiunge un toggle nella admin bar per scegliere/disattivare il tema di staging nel backend.
+     */
+    public function add_admin_bar_toggle($wp_admin_bar) {
+        if (!current_user_can('manage_options') || !is_admin()) {
+            return;
+        }
+
+        $active = $this->get_active_admin_staging();
+        $versions = $this->get_staging_versions();
+
+        // Nodo principale: mostra lo stato corrente
+        $title = $active
+            ? '🎭 Staging admin: ' . esc_html($active)
+            : '🎭 Staging admin: off';
+
+        $wp_admin_bar->add_node(array(
+            'id'    => 'staging_admin_toggle',
+            'title' => $title,
+            'href'  => false,
+            'meta'  => array(
+                'class' => $active ? 'staging-admin-active' : '',
+            ),
+        ));
+
+        // Sottovoce per ogni versione disponibile
+        foreach ($versions as $version) {
+            if (!$this->staging_theme_exists($version)) {
+                continue;
+            }
+            $is_current = ($active === $version);
+            $wp_admin_bar->add_node(array(
+                'parent' => 'staging_admin_toggle',
+                'id'     => 'staging_admin_v_' . $version,
+                'title'  => ($is_current ? '● ' : '○ ') . esc_html($version),
+                'href'   => $this->get_admin_toggle_url($version),
+            ));
+        }
+
+        // Voce per disattivare
+        $wp_admin_bar->add_node(array(
+            'parent' => 'staging_admin_toggle',
+            'id'     => 'staging_admin_off',
+            'title'  => ($active ? '○ ' : '● ') . 'Disattiva',
+            'href'   => $this->get_admin_toggle_url(''),
+        ));
+    }
+
+    /**
+     * Costruisce l'URL (con nonce) per impostare una versione di staging-admin.
+     * Versione vuota = disattivazione.
+     */
+    private function get_admin_toggle_url($version) {
+        $url = add_query_arg(
+            array(
+                'action'  => 'staging_set_admin',
+                'version' => $version,
+            ),
+            admin_url('admin-post.php')
+        );
+        return wp_nonce_url($url, 'staging_set_admin');
+    }
+
+    /**
+     * Handler: imposta o azzera il cookie della modalità staging-admin, poi torna indietro.
+     */
+    public function handle_set_admin_staging() {
+        check_admin_referer('staging_set_admin');
+
+        if (!current_user_can('manage_options')) {
+            wp_die('Permessi insufficienti');
+        }
+
+        $version = isset($_GET['version']) ? sanitize_title($_GET['version']) : '';
+
+        $cookie_path = defined('COOKIEPATH') ? COOKIEPATH : '/';
+        $cookie_domain = defined('COOKIE_DOMAIN') ? COOKIE_DOMAIN : '';
+
+        if (!empty($version) && $this->staging_theme_exists($version)) {
+            // Attiva: cookie valido per 7 giorni
+            $expire = time() + (defined('DAY_IN_SECONDS') ? DAY_IN_SECONDS : 86400) * 7;
+            setcookie($this->admin_cookie, $version, $expire, $cookie_path, $cookie_domain, is_ssl(), true);
+        } else {
+            // Disattiva: scadenza nel passato
+            setcookie($this->admin_cookie, '', time() - 3600, $cookie_path, $cookie_domain, is_ssl(), true);
+        }
+
+        $redirect = wp_get_referer();
+        if (!$redirect) {
+            $redirect = admin_url();
+        }
+        wp_safe_redirect($redirect);
+        exit;
+    }
+
+    /**
+     * Mostra un avviso quando il backend sta visualizzando un tema di staging.
+     */
+    public function admin_notice_staging_active() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        $active = $this->get_active_admin_staging();
+        if (!$active) {
+            return;
+        }
+        $off_url = $this->get_admin_toggle_url('');
+        ?>
+        <div class="notice notice-warning">
+            <p>
+                Stai visualizzando il backend con il tema di staging
+                «<strong><?php echo esc_html($active); ?></strong>» invece del tema attivo.
+                <a href="<?php echo esc_url($off_url); ?>">Disattiva</a>
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Stile per evidenziare il toggle nella admin bar quando la modalità staging-admin è attiva.
+     */
+    public function admin_bar_toggle_style() {
+        if (!$this->get_active_admin_staging()) {
+            return;
+        }
+        echo '<style>#wpadminbar .staging-admin-active > .ab-item { background: #d63638 !important; color: #fff !important; }</style>';
     }
 
     // Duplica il tema
