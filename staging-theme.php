@@ -3,9 +3,9 @@
 /**
  * Plugin Name: Staging Theme
  * Description: Permette di creare più versioni di staging di un tema e attivarle tramite parametro nell'URL
- * Version: 1.3.0
+ * Version: 1.4.0
  * Author: SP Studio
- * Changelog: Aggiunta modalità staging per il backend (wp-admin) con toggle nella admin bar.
+ * Changelog: Modalità staging per il backend (wp-admin) con toggle nella admin bar; elenco versioni allineato al filesystem (via voci orfane e pulsante "Rimuovi dall'elenco").
  */
 
 // Previeni l'accesso diretto al file
